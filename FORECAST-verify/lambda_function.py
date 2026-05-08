@@ -265,9 +265,17 @@ def lambda_handler(event, context):
         fc["shoptype"] = fc["shoptype"].astype(str).str.strip() if "shoptype" in fc.columns else ""
         print(f"[verify] forecast.csv: {len(fc)} rows")
 
-        # Build set of shops that have their own forecast row
-        fc_shop_set = set(fc["forecasted_shop"].unique())
-        print(f"[verify] distinct forecast shops: {len(fc_shop_set)}")
+        # Named forecast shops (excluding "Other *" and "Unassigned")
+        fc_named_shops = set(
+            s for s in fc["forecasted_shop"].unique()
+            if not s.startswith("Other ") and s != "Unassigned"
+        )
+        # "Other [shoptype]" entries in forecast
+        fc_other_shops = set(
+            s for s in fc["forecasted_shop"].unique()
+            if s.startswith("Other ")
+        )
+        print(f"[verify] forecast shops: {len(fc_named_shops)} named, {len(fc_other_shops)} Other")
 
         # Read actuals.csv
         act_raw = pd.read_csv(S3.get_object(Bucket=CFG.bucket, Key=CFG.actuals_key)["Body"])
@@ -280,14 +288,6 @@ def lambda_handler(event, context):
         act_raw["forecasted_shop"] = act_raw["forecasted_shop"].astype(str).str.strip()
         act_raw["shoptype"] = act_raw["shoptype"].astype(str).str.strip()
 
-        # ── Remap actuals shops to match forecast shops ───────────────
-        # If a shop exists in forecast.csv → keep as-is
-        # Otherwise → map to "Other [shoptype]"
-        has_fc = act_raw["forecasted_shop"].isin(fc_shop_set)
-        act_raw.loc[~has_fc, "forecasted_shop"] = "Other " + act_raw.loc[~has_fc, "shoptype"]
-        remapped = (~has_fc).sum()
-        print(f"[verify] actuals remapped to Other [shoptype]: {remapped} rows")
-
         t = int(act_raw["fulldate"].dt.year.max())
         print(f"[verify] year t = {t}")
 
@@ -299,32 +299,139 @@ def lambda_handler(event, context):
         if not all_weeks:
             return {"ok": False, "error": "no weeks"}
 
-        # ── Build shop-level aggregations ─────────────────────────────
+        # ── Build shop-level aggregations (residual approach) ─────────
+        #
+        # For named shops: aggregate actuals where forecasted_shop matches
+        # For "Other [shoptype]": compute as shoptype total minus named shops
+        #
+        # This matches FORECAST-review-region's approach.
 
         shop_grp = ["destination_region", "forecasted_shop", "forecast_product"]
+        st_grp = ["destination_region", "shoptype", "forecast_product"]
 
         act_t = act_raw[act_raw["week"].str.startswith(f"{t}-")]
-        agg_actuals = (
-            act_t.groupby(shop_grp + ["week"], dropna=False)["actuals"]
+        act_ly = act_raw[act_raw["week"].str.startswith(f"{t - 1}-")]
+
+        # 1) Named-shop actuals (shops that have their own forecast row)
+        act_t_named = act_t[act_t["forecasted_shop"].isin(fc_named_shops)]
+        agg_named_t = (
+            act_t_named.groupby(shop_grp + ["week"], dropna=False)["actuals"]
+            .sum().astype(float)
+        )
+        act_ly_named = act_ly[act_ly["forecasted_shop"].isin(fc_named_shops)]
+        agg_named_ly = (
+            act_ly_named.groupby(shop_grp + ["week"], dropna=False)["actuals"]
             .sum().astype(float)
         )
 
-        act_ly = act_raw[act_raw["week"].str.startswith(f"{t - 1}-")]
-        agg_ly_raw = (
-            act_ly.groupby(shop_grp + ["week"], dropna=False)["actuals"]
+        # 2) Shoptype totals (all actuals under each shoptype)
+        agg_st_t = (
+            act_t.groupby(st_grp + ["week"], dropna=False)["actuals"]
             .sum().astype(float)
         )
-        if not agg_ly_raw.empty:
-            idx = agg_ly_raw.index
+        agg_st_ly = (
+            act_ly.groupby(st_grp + ["week"], dropna=False)["actuals"]
+            .sum().astype(float)
+        )
+
+        # 3) Sum of named shops per shoptype (to subtract from total)
+        act_t_named_st = act_t_named.copy()
+        act_t_named_st["_st"] = act_t_named_st["shoptype"]
+        agg_named_by_st_t = (
+            act_t_named_st.groupby(["destination_region", "_st", "forecast_product", "week"],
+                                   dropna=False)["actuals"]
+            .sum().astype(float)
+        )
+        act_ly_named_st = act_ly_named.copy()
+        act_ly_named_st["_st"] = act_ly_named_st["shoptype"]
+        agg_named_by_st_ly = (
+            act_ly_named_st.groupby(["destination_region", "_st", "forecast_product", "week"],
+                                    dropna=False)["actuals"]
+            .sum().astype(float)
+        )
+
+        # 4) Compute "Other [shoptype]" residual rows and append to named aggs
+        other_rows_t = []
+        other_rows_ly = []
+        for other_shop in fc_other_shops:
+            st_name = other_shop[len("Other "):]  # e.g. "ORWO" from "Other ORWO"
+            try:
+                st_total = agg_st_t.xs(st_name, level="shoptype")
+            except KeyError:
+                continue
+            for key, total_val in st_total.items():
+                dest, prod, wk = key if isinstance(key, tuple) else (key,)
+                named_val = 0.0
+                try:
+                    named_val = float(agg_named_by_st_t.loc[(dest, st_name, prod, wk)])
+                except (KeyError, TypeError):
+                    pass
+                residual = total_val - named_val
+                if residual != 0:
+                    other_rows_t.append({
+                        "destination_region": dest,
+                        "forecasted_shop": other_shop,
+                        "forecast_product": prod,
+                        "week": wk,
+                        "actuals": residual,
+                    })
+
+        for other_shop in fc_other_shops:
+            st_name = other_shop[len("Other "):]
+            try:
+                st_total = agg_st_ly.xs(st_name, level="shoptype")
+            except KeyError:
+                continue
+            for key, total_val in st_total.items():
+                dest, prod, wk = key if isinstance(key, tuple) else (key,)
+                named_val = 0.0
+                try:
+                    named_val = float(agg_named_by_st_ly.loc[(dest, st_name, prod, wk)])
+                except (KeyError, TypeError):
+                    pass
+                residual = total_val - named_val
+                if residual != 0:
+                    other_rows_ly.append({
+                        "destination_region": dest,
+                        "forecasted_shop": other_shop,
+                        "forecast_product": prod,
+                        "week": wk,
+                        "actuals": residual,
+                    })
+
+        # Combine named + Other into final actuals aggregations
+        if other_rows_t:
+            other_df_t = pd.DataFrame(other_rows_t)
+            other_agg_t = other_df_t.set_index(shop_grp + ["week"])["actuals"]
+            agg_actuals = pd.concat([agg_named_t, other_agg_t])
+            agg_actuals = agg_actuals.groupby(level=agg_actuals.index.names).sum()
+        else:
+            agg_actuals = agg_named_t
+
+        if other_rows_ly:
+            other_df_ly = pd.DataFrame(other_rows_ly)
+            other_agg_ly = other_df_ly.set_index(shop_grp + ["week"])["actuals"]
+            agg_actuals_ly_combined = pd.concat([agg_named_ly, other_agg_ly])
+            agg_actuals_ly_combined = agg_actuals_ly_combined.groupby(
+                level=agg_actuals_ly_combined.index.names).sum()
+        else:
+            agg_actuals_ly_combined = agg_named_ly
+
+        # Shift LY week index to year t for alignment
+        if not agg_actuals_ly_combined.empty:
+            idx = agg_actuals_ly_combined.index
             new_weeks = [shift_week_year(w, t) for w in idx.get_level_values("week")]
-            agg_actuals_ly = agg_ly_raw.copy()
+            agg_actuals_ly = agg_actuals_ly_combined.copy()
             agg_actuals_ly.index = pd.MultiIndex.from_arrays(
                 [idx.get_level_values(c) for c in shop_grp] + [new_weeks],
                 names=shop_grp + ["week"],
             )
         else:
-            agg_actuals_ly = agg_ly_raw
+            agg_actuals_ly = agg_actuals_ly_combined
 
+        print(f"[verify] residual Other rows: t={len(other_rows_t)}, ly={len(other_rows_ly)}")
+
+        # Forecast aggregation
         fc_t = fc[fc["iso_week"].str.startswith(f"{t}-")]
         agg_forecast = (
             fc_t.groupby(shop_grp + ["iso_week"], dropna=False)["FQTY"]
