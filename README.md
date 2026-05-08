@@ -26,9 +26,24 @@ Slack slash commands
 6. **FORECAST-review-shoptype** — Generates shoptype-level review Excel with dual-region summary (EU+RoW / US+CA) and per-product sheets with top-5 shop breakdowns.
 7. **FORECAST-review-region** — Generates region-level review Excel with weekly + monthly tables broken down by shoptype and shop.
 8. **FORECAST-calculate** — Full pipeline: computes remaining (unforecasted) products, distributes by format/PCS/DOW/shoptype shares, produces daily `forecast.csv`, uploads to S3 + SharePoint.
-9. **FORECAST-verify** — Returns forecast status: latest actuals date, anchor cutoff, and shop-level coverage summary.
+9. **FORECAST-verify** — Generates an Actuals vs Forecast comparison Excel workbook at the weekly level, broken down by destination, shop, and product. Writes to S3.
 10. **FORECAST-review-trigger** — API Gateway entry point that parses Slack slash commands and dispatches to worker Lambdas.
 11. **FORECAST-review-trigger-verify** — Validates shop/shoptype names against actuals before dispatching review workers.
+
+## Scheduled Trigger
+
+A Step Functions state machine **FORECAST-steps** orchestrates the daily data refresh:
+
+```
+Start → FORECAST-actuals → FORECAST-inputs → End
+```
+
+- **State machine ARN:** `arn:aws:states:eu-central-1:497892281264:execution:FORECAST-steps`
+- **IAM role:** `arn:aws:iam::497892281264:role/service-role/StepFunctions-FORECAST-steps-role-n6ik54ptu`
+- **Schedule:** EventBridge Scheduler `FORECAST-actuals` — cron `0 8 * * ? *` (daily at 08:00 UTC+3 / 05:00 UTC)
+- **State transitions:** 4 (Start → Actuals → Inputs → End)
+
+This ensures `actuals.csv` is refreshed from Redshift and mappings are applied from SharePoint every morning before users interact with the forecast.
 
 ## S3 Bucket
 

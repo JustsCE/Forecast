@@ -1,6 +1,6 @@
 # FORECAST-verify
 
-Returns the current forecast status to Slack: latest actuals date, anchor cutoff, and a shop-level coverage summary table.
+Generates an Actuals vs Forecast comparison Excel workbook at the weekly level, broken down by destination, shop, and product. Writes the result to S3.
 
 ## Runtime
 
@@ -13,33 +13,41 @@ Returns the current forecast status to Slack: latest actuals date, anchor cutoff
 
 ## How It Works
 
-1. Reads `actuals.csv` to determine the latest actuals date.
-2. Reads `Forecast_Input.xlsx` info sheet to get the anchor cutoff (cell C2).
-3. Reads `seperate_forecasts_combined.csv` and builds a summary:
-   - Filters to rows where `shoptype != forecasted_shop` (separately forecasted shops).
-   - Pivots by `(product, forecasted_shop)` with `US+CA` and `EU+RoW` columns.
-4. Formats a Slack message with a monospaced table showing forecast totals per shop/product/region.
-
-## Example Output
+1. Reads `forecast.csv` from S3, filters to `source == "separate"` rows (shop-level manual forecasts).
+2. Reads `actuals.csv` from S3, determines the current year (`t`).
+3. Computes three aggregations grouped by `(destination_region, forecasted_shop, forecast_product, week)`:
+   - **Actuals** (year t): sum of `actuals` column
+   - **Actuals LY** (year t-1, week-shifted to align with t): for YoY calculations
+   - **Forecast** (year t): sum of `FQTY` column
+4. Produces an Excel workbook with **one sheet per product**.
+5. Within each sheet, blocks for each `(destination, shop)` combo:
 
 ```
-📊 Forecast Status
-• Actuals latest date: 2026-05-07
-• Anchor cutoff (Forecast Input): 2026-19
-
-Separate forecasts (shop ≠ shoptype):
-Product    Shop           US+CA   EU+RoW
--------------------------------------
-Canvas     sendmoments      120    5,400
-Postcard   ORWO               0   12,000
+Destination: EU+RoW | Shop: sendmoments
+             2026-01   2026-02   2026-03   ...
+Actuals        1,200     1,400     1,100   ...
+Forecast       1,300     1,350     1,150   ...
+F-YoY %        8.3%     -3.6%      4.5%   ...    = Forecast / Actuals_LY - 1
+YoY %         10.1%      5.2%      3.1%   ...    = Actuals / Actuals_LY - 1
+Error           -100        50       -50   ...    = Actuals - Forecast
+Error %        -8.3%      3.6%     -4.5%   ...    = Error / Forecast
 ```
+
+6. Writes the workbook to S3.
+7. Posts a text confirmation to Slack via `response_url`.
 
 ## S3 Data
 
-- **Reads:** `Forecast/actuals.csv`, `Forecast/Forecast_Input.xlsx`, `Forecast/Seperate Forecasts/seperate_forecasts_combined.csv`
+- **Reads:** `Forecast/forecast.csv`, `Forecast/actuals.csv`
+- **Writes:** `Forecast/verify_actuals_vs_forecast.xlsx`
+
+## Dimensions
+
+Comparison is grouped by: `destination_region` x `forecasted_shop` x `forecast_product` x `week`
+
+Week columns show all ISO weeks from year t present in either dataset.
 
 ## Dependencies
 
-- `boto3`, `pandas`
-- `urllib.request` (Slack posting)
-- SSM Parameter: `/forecast/slack-bot-token`
+- `boto3`, `pandas`, `openpyxl`
+- `urllib.request` (Slack text notification)
