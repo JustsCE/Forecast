@@ -26,7 +26,7 @@ Slack slash commands
 6. **FORECAST-review-shoptype** — Generates shoptype-level review Excel with dual-region summary (EU+RoW / US+CA) and per-product sheets with top-5 shop breakdowns.
 7. **FORECAST-review-region** — Generates region-level review Excel with weekly + monthly tables broken down by shoptype and shop.
 8. **FORECAST-calculate** — Full pipeline: computes remaining (unforecasted) products, distributes by format/PCS/DOW/shoptype shares, produces daily `forecast.csv`, uploads to S3 + SharePoint.
-9. **FORECAST-verify** — Generates an Actuals vs Forecast comparison Excel workbook at the weekly level, broken down by destination, shop, and product. Writes to S3.
+9. **FORECAST-verify** — Generates an Actuals vs Forecast comparison Excel workbook at the weekly level. Summary sheet (product × destination) + per-product sheets (shop breakdown), split by region, with cutoff-week border, pre-cutoff graying, and residual "Other [shoptype]" actuals. Writes to S3.
 10. **FORECAST-review-trigger** — API Gateway entry point that parses Slack slash commands and dispatches to worker Lambdas.
 11. **FORECAST-review-trigger-verify** — Validates shop/shoptype names against actuals before dispatching review workers.
 
