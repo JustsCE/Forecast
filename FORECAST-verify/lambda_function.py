@@ -90,16 +90,16 @@ def lambda_handler(event, context):
     response_url = event.get("response_url", "")
 
     try:
-        # Read forecast.csv — filter to separate source (has forecasted_shop)
-        fc_raw = pd.read_csv(S3.get_object(Bucket=CFG.bucket, Key=CFG.forecast_key)["Body"])
-        fc = fc_raw[fc_raw.get("source", pd.Series(dtype=str)).astype(str) == "separate"].copy()
+        # Read forecast.csv — all rows (remaining + separate)
+        fc = pd.read_csv(S3.get_object(Bucket=CFG.bucket, Key=CFG.forecast_key)["Body"])
         fc["forecasted_shop"] = fc["forecasted_shop"].astype(str).str.strip()
-        fc = fc[fc["forecasted_shop"].notna() & (fc["forecasted_shop"] != "") & (fc["forecasted_shop"] != "nan")]
+        fc.loc[fc["forecasted_shop"].isin(["", "nan", "None"]), "forecasted_shop"] = "Unassigned"
+        fc["forecasted_shop"] = fc["forecasted_shop"].fillna("Unassigned")
         fc["FQTY"] = to_num(fc["FQTY"])
         fc["iso_week"] = fc["iso_week"].astype(str).str.strip()
         fc["forecast_product"] = fc["forecast_product"].astype(str).str.strip()
         fc["destination_region"] = fc["destination_region"].astype(str).str.strip()
-        print(f"[verify] forecast.csv: {len(fc_raw)} total rows, {len(fc)} separate rows")
+        print(f"[verify] forecast.csv: {len(fc)} rows")
 
         # Read actuals.csv
         act_raw = pd.read_csv(S3.get_object(Bucket=CFG.bucket, Key=CFG.actuals_key)["Body"])
@@ -319,8 +319,6 @@ def lambda_handler(event, context):
         )
         print(f"[verify] Wrote {len(products)} product sheets to s3://{CFG.bucket}/{CFG.out_key}")
 
-        slack_reply(response_url, f"Verify workbook written to `s3://{CFG.bucket}/{CFG.out_key}`")
-
         return {
             "ok": True,
             "s3_key": CFG.out_key,
@@ -331,5 +329,4 @@ def lambda_handler(event, context):
     except Exception as e:
         print(f"[verify] ERROR: {e}")
         import traceback; traceback.print_exc()
-        slack_reply(response_url, f"Error building verify workbook: {e}")
         return {"ok": False, "error": str(e)}
