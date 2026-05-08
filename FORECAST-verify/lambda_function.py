@@ -167,10 +167,16 @@ def lambda_handler(event, context):
             f = get_val(agg_fc, key)
             a_ly = get_val(agg_ly, key)
 
-            fyoy = (f / a_ly - 1.0) if a_ly != 0 else 0.0
-            yoy = (a / a_ly - 1.0) if a_ly != 0 else 0.0
             err = a - f
-            err_pct = (err / f) if f != 0 else 0.0
+
+            if a == 0 or f == 0:
+                fyoy = 0.0
+                yoy = 0.0
+                err_pct = 0.0
+            else:
+                fyoy = (f / a_ly - 1.0) if a_ly != 0 else 0.0
+                yoy = (a / a_ly - 1.0) if a_ly != 0 else 0.0
+                err_pct = err / f
 
             actuals_vals.append(a)
             forecast_vals.append(f)
@@ -287,41 +293,31 @@ def lambda_handler(event, context):
         print(f"[verify] agg sizes: shop(act={len(agg_actuals)}, ly={len(agg_actuals_ly)}, fc={len(agg_forecast)}), "
               f"prod(act={len(agg_act_prod)}, ly={len(agg_ly_prod)}, fc={len(agg_fc_prod)})")
 
-        # ── Discover products and combos ──────────────────────────────
+        # ── Discover products and combos (forecast-only) ───────────────
 
-        products = sorted(fc_t["forecast_product"].dropna().unique().tolist())
-        print(f"[verify] products: {len(products)}")
-
+        # Only shops present in forecast.csv
         fc_combos = set(
             fc_t[shop_grp].drop_duplicates()
             .apply(lambda r: (r["destination_region"], r["forecasted_shop"], r["forecast_product"]), axis=1)
         )
-        act_combos = set(
-            act_t[act_t["forecasted_shop"].isin(fc["forecasted_shop"].unique())]
-            [shop_grp].drop_duplicates()
-            .apply(lambda r: (r["destination_region"], r["forecasted_shop"], r["forecast_product"]), axis=1)
-        )
-        all_combos = fc_combos | act_combos
 
         product_combos = {}
-        for dest, shop, prod in all_combos:
+        for dest, shop, prod in fc_combos:
             product_combos.setdefault(prod, set()).add((dest, shop))
 
-        # Product-level (dest only) combos
+        # Product-level (dest only) combos from forecast
         product_dests = {}
-        for prod in products:
-            dests = set()
-            for dest, shop, p in all_combos:
-                if p == prod:
-                    dests.add(dest)
-            # Also check product-level aggs
-            try:
-                for key in agg_fc_prod.index:
-                    if key[1] == prod:
-                        dests.add(key[0])
-            except Exception:
-                pass
-            product_dests[prod] = sorted(dests)
+        for prod, combos in product_combos.items():
+            product_dests[prod] = sorted(set(d for d, s in combos))
+
+        # Sort products by YTD actuals total (descending)
+        ytd_by_product = act_t.groupby("forecast_product")["actuals"].sum()
+        products = sorted(
+            product_combos.keys(),
+            key=lambda p: ytd_by_product.get(p, 0),
+            reverse=True,
+        )
+        print(f"[verify] products: {len(products)} (sorted by YTD)")
 
         # ── Build Excel workbook ──────────────────────────────────────
 
@@ -373,9 +369,31 @@ def lambda_handler(event, context):
 
             # Row 1: week headers
             write_week_header_row(ws, all_weeks, row=1)
+            max_c = len(all_weeks) + 1
+
+            # Split by region: EU+RoW first, then gap, then US+CA
+            eu_combos = sorted((d, s) for d, s in combos if d == "EU+RoW")
+            us_combos = sorted((d, s) for d, s in combos if d == "US+CA")
 
             current_row = 2
-            for dest, shop in sorted(combos):
+            for dest, shop in eu_combos:
+                label = f"Destination: {dest} | Shop: {shop}"
+                vals = compute_block_values(
+                    all_weeks, agg_actuals, agg_forecast, agg_actuals_ly,
+                    key_prefix=(dest, shop, product),
+                )
+                current_row = write_block(
+                    ws, current_row, label, all_weeks, *vals,
+                )
+
+            # 10 blank rows between regions (only if both exist)
+            if eu_combos and us_combos:
+                for _ in range(10):
+                    for c in range(1, max_c + 1):
+                        ws.cell(row=current_row, column=c).fill = WHITE_FILL
+                    current_row += 1
+
+            for dest, shop in us_combos:
                 label = f"Destination: {dest} | Shop: {shop}"
                 vals = compute_block_values(
                     all_weeks, agg_actuals, agg_forecast, agg_actuals_ly,
