@@ -316,12 +316,27 @@ def lambda_handler(event, context):
         act_ly = act_raw[act_raw["week"].str.startswith(f"{t - 1}-")]
 
         # 1) Named-shop actuals (shops that have their own forecast row)
-        act_t_named = act_t[act_t["forecasted_shop"].isin(fc_named_shops)]
+        #    Exclude rows where forecasted_shop == shoptype AND "Other [shoptype]"
+        #    exists in forecast — those actuals belong to the "Other" residual.
+        #    Matches FORECAST-review-region line 218: s != shoptype.
+        fc_other_shoptypes = set(s[len("Other "):] for s in fc_other_shops)
+        is_named = act_t["forecasted_shop"].isin(fc_named_shops)
+        is_shoptype_self = (
+            (act_t["forecasted_shop"] == act_t["shoptype"]) &
+            act_t["shoptype"].isin(fc_other_shoptypes)
+        )
+        act_t_named = act_t[is_named & ~is_shoptype_self]
         agg_named_t = (
             act_t_named.groupby(shop_grp + ["week"], dropna=False)["actuals"]
             .sum().astype(float)
         )
-        act_ly_named = act_ly[act_ly["forecasted_shop"].isin(fc_named_shops)]
+
+        is_named_ly = act_ly["forecasted_shop"].isin(fc_named_shops)
+        is_shoptype_self_ly = (
+            (act_ly["forecasted_shop"] == act_ly["shoptype"]) &
+            act_ly["shoptype"].isin(fc_other_shoptypes)
+        )
+        act_ly_named = act_ly[is_named_ly & ~is_shoptype_self_ly]
         agg_named_ly = (
             act_ly_named.groupby(shop_grp + ["week"], dropna=False)["actuals"]
             .sum().astype(float)
