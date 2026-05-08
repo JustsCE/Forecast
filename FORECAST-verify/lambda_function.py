@@ -218,15 +218,9 @@ def lambda_handler(event, context):
             a_ly = get_val(agg_ly, key)
 
             err = a - f
-
-            if a == 0 or f == 0:
-                fyoy = 0.0
-                yoy = 0.0
-                err_pct = 0.0
-            else:
-                fyoy = (f / a_ly - 1.0) if a_ly != 0 else 0.0
-                yoy = (a / a_ly - 1.0) if a_ly != 0 else 0.0
-                err_pct = err / f
+            fyoy = (f / a_ly - 1.0) if (f != 0 and a_ly != 0) else 0.0
+            yoy = (a / a_ly - 1.0) if (a != 0 and a_ly != 0) else 0.0
+            err_pct = (err / f) if f != 0 else 0.0
 
             actuals_vals.append(a)
             forecast_vals.append(f)
