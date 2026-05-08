@@ -101,7 +101,8 @@ def lambda_handler(event, context):
         return current_row + 1
 
     def write_block(ws, current_row, label, all_weeks, actuals_vals,
-                    forecast_vals, fyoy_vals, yoy_vals, error_vals, error_pct_vals):
+                    forecast_vals, actuals_ly_vals, fyoy_vals, yoy_vals,
+                    error_vals, error_pct_vals):
         max_c = len(all_weeks) + 1
 
         cell = ws.cell(row=current_row, column=1, value=label)
@@ -114,12 +115,13 @@ def lambda_handler(event, context):
         current_row += 1
 
         metrics = [
-            ("Actuals",  actuals_vals,  INTEGER_FMT),
-            ("Forecast", forecast_vals, INTEGER_FMT),
-            ("F-YoY %",  fyoy_vals,     PERCENT_FMT),
-            ("YoY %",    yoy_vals,      PERCENT_FMT),
-            ("Error",    error_vals,    INTEGER_FMT),
-            ("Error %",  error_pct_vals, PERCENT_FMT),
+            ("Actuals",    actuals_vals,    INTEGER_FMT),
+            ("Forecast",   forecast_vals,   INTEGER_FMT),
+            ("Actuals LY", actuals_ly_vals, INTEGER_FMT),
+            ("F-YoY %",    fyoy_vals,       PERCENT_FMT),
+            ("YoY %",      yoy_vals,        PERCENT_FMT),
+            ("Error",      error_vals,      INTEGER_FMT),
+            ("Error %",    error_pct_vals,  PERCENT_FMT),
         ]
 
         for metric_label, vals, fmt in metrics:
@@ -206,7 +208,7 @@ def lambda_handler(event, context):
         ws.column_dimensions["A"].width = max(18, ws.column_dimensions["A"].width)
 
     def compute_block_values(all_weeks, agg_act, agg_fc, agg_ly, key_prefix):
-        actuals_vals, forecast_vals = [], []
+        actuals_vals, forecast_vals, actuals_ly_vals = [], [], []
         fyoy_vals, yoy_vals, error_vals, error_pct_vals = [], [], [], []
 
         for wk in all_weeks:
@@ -228,12 +230,13 @@ def lambda_handler(event, context):
 
             actuals_vals.append(a)
             forecast_vals.append(f)
+            actuals_ly_vals.append(a_ly)
             fyoy_vals.append(fyoy)
             yoy_vals.append(yoy)
             error_vals.append(err)
             error_pct_vals.append(err_pct)
 
-        return actuals_vals, forecast_vals, fyoy_vals, yoy_vals, error_vals, error_pct_vals
+        return actuals_vals, forecast_vals, actuals_ly_vals, fyoy_vals, yoy_vals, error_vals, error_pct_vals
 
     def write_blank_rows(ws, current_row, n, max_c):
         for _ in range(n):
@@ -602,7 +605,7 @@ def lambda_handler(event, context):
             "products": len(products),
             "weeks": len(all_weeks),
             "cutoff_week": cutoff_week,
-            "actuals_remapped": int(remapped),
+            "other_residual_rows_t": len(other_rows_t),
         }
 
     except Exception as e:
