@@ -26,11 +26,14 @@ def lambda_handler(event, context):
 
     # ── Style constants ───────────────────────────────────────────────
     WHITE_FILL = PatternFill(fill_type="solid", fgColor="FFFFFF")
+    GRAY_FILL = PatternFill(fill_type="solid", fgColor="F2F2F2")
     THIN = Side(style="thin", color="000000")
     THICK = Side(style="thick", color="000000")
     HEADER_BOTTOM_BORDER = Border(bottom=THIN)
     BOLD_FONT = Font(bold=True)
     BOLD_FONT_LARGE = Font(bold=True, size=13)
+    GRAY_FONT = Font(color="595959")
+    GRAY_FONT_BOLD = Font(bold=True, color="595959")
     LEFT_ALIGN = Alignment(horizontal="left")
     RIGHT_ALIGN = Alignment(horizontal="right")
     INDENT_ALIGN = Alignment(horizontal="left", indent=1)
@@ -79,7 +82,6 @@ def lambda_handler(event, context):
             return 0.0
 
     def write_week_header_row(ws, all_weeks, row=1):
-        """Write yyyy-ww headers in row 1, starting at column B."""
         ws.cell(row=row, column=1, value="").fill = WHITE_FILL
         for wi, wk in enumerate(all_weeks):
             c = wi + 2
@@ -90,7 +92,6 @@ def lambda_handler(event, context):
             cell.fill = WHITE_FILL
 
     def write_section_header(ws, current_row, label, max_c):
-        """Write a bold region section header spanning the row."""
         cell = ws.cell(row=current_row, column=1, value=label)
         cell.font = BOLD_FONT_LARGE
         cell.fill = WHITE_FILL
@@ -101,10 +102,8 @@ def lambda_handler(event, context):
 
     def write_block(ws, current_row, label, all_weeks, actuals_vals,
                     forecast_vals, fyoy_vals, yoy_vals, error_vals, error_pct_vals):
-        """Write a shop or product block (no destination prefix). Returns next row."""
         max_c = len(all_weeks) + 1
 
-        # ── Label row (shop name or product name) ────────────────
         cell = ws.cell(row=current_row, column=1, value=label)
         cell.font = BOLD_FONT
         cell.fill = WHITE_FILL
@@ -114,7 +113,6 @@ def lambda_handler(event, context):
             ws.cell(row=current_row, column=c).border = HEADER_BOTTOM_BORDER
         current_row += 1
 
-        # ── Metric rows ──────────────────────────────────────────
         metrics = [
             ("Actuals",  actuals_vals,  INTEGER_FMT),
             ("Forecast", forecast_vals, INTEGER_FMT),
@@ -139,7 +137,6 @@ def lambda_handler(event, context):
 
             current_row += 1
 
-        # ── Blank separator row ──────────────────────────────────
         for c in range(1, max_c + 1):
             ws.cell(row=current_row, column=c).fill = WHITE_FILL
         current_row += 1
@@ -147,32 +144,46 @@ def lambda_handler(event, context):
         return current_row
 
     def apply_cutoff_border(ws, all_weeks, cutoff_week):
-        """Add thick right border on the cutoff week column for all data rows."""
         if cutoff_week not in all_weeks:
             return
-        col_idx = all_weeks.index(cutoff_week) + 2  # +2 because col A is labels, B is first week
+        col_idx = all_weeks.index(cutoff_week) + 2
         for r in range(1, ws.max_row + 1):
             cell = ws.cell(row=r, column=col_idx)
             b = cell.border or Border()
             cell.border = Border(left=b.left, right=THICK, top=b.top, bottom=b.bottom)
 
+    def apply_pre_cutoff_gray(ws, all_weeks, cutoff_week):
+        """Gray out all cells (fill + font) in columns before the cutoff week."""
+        if cutoff_week not in all_weeks:
+            return
+        cutoff_col = all_weeks.index(cutoff_week) + 2  # col index of cutoff week
+        # Gray columns: from col 1 (labels) through cutoff_col (inclusive)
+        for r in range(1, ws.max_row + 1):
+            for c in range(1, cutoff_col + 1):
+                cell = ws.cell(row=r, column=c)
+                cell.fill = GRAY_FILL
+                # Preserve bold on label/header cells
+                if cell.font and cell.font.bold:
+                    cell.font = GRAY_FONT_BOLD
+                else:
+                    cell.font = GRAY_FONT
+                # Preserve existing borders
+                # (cutoff border applied separately after this)
+
     def apply_week_grouping(ws, all_weeks, cutoff_week):
-        """Group (collapse) all week columns before cutoff_week - 6."""
         if cutoff_week not in all_weeks:
             return
         cutoff_idx = all_weeks.index(cutoff_week)
-        group_end_idx = cutoff_idx - 6  # show 6 weeks before cutoff
+        group_end_idx = cutoff_idx - 6
         if group_end_idx <= 0:
             return
-        # Columns to group: from col 2 (first week) to col (group_end_idx + 1)
         for i in range(0, group_end_idx):
-            col = i + 2  # week columns start at col 2
+            col = i + 2
             col_dim = ws.column_dimensions[get_column_letter(col)]
             col_dim.outlineLevel = 1
             col_dim.hidden = True
 
     def auto_width(ws, n_weeks):
-        """Set column widths based on content."""
         max_col = n_weeks + 1
         for c in range(1, max_col + 1):
             max_len = 0
@@ -195,7 +206,6 @@ def lambda_handler(event, context):
         ws.column_dimensions["A"].width = max(18, ws.column_dimensions["A"].width)
 
     def compute_block_values(all_weeks, agg_act, agg_fc, agg_ly, key_prefix):
-        """Compute 6 metric lists for a given key prefix."""
         actuals_vals, forecast_vals = [], []
         fyoy_vals, yoy_vals, error_vals, error_pct_vals = [], [], [], []
 
@@ -240,8 +250,8 @@ def lambda_handler(event, context):
         # Read Forecast_Input.xlsx info sheet → cutoff week (C2)
         input_bytes = S3.get_object(Bucket=CFG.bucket, Key=CFG.input_key)["Body"].read()
         info = pd.read_excel(BytesIO(input_bytes), sheet_name="info", header=None)
-        cutoff_week = str(info.iat[1, 2]).strip()  # e.g. "2026-19"
-        print(f"[verify] cutoff_week from Forecast_Input: {cutoff_week}")
+        cutoff_week = str(info.iat[1, 2]).strip()
+        print(f"[verify] cutoff_week: {cutoff_week}")
 
         # Read forecast.csv
         fc = pd.read_csv(S3.get_object(Bucket=CFG.bucket, Key=CFG.forecast_key)["Body"])
@@ -252,7 +262,12 @@ def lambda_handler(event, context):
         fc["iso_week"] = fc["iso_week"].astype(str).str.strip()
         fc["forecast_product"] = fc["forecast_product"].astype(str).str.strip()
         fc["destination_region"] = fc["destination_region"].astype(str).str.strip()
+        fc["shoptype"] = fc["shoptype"].astype(str).str.strip() if "shoptype" in fc.columns else ""
         print(f"[verify] forecast.csv: {len(fc)} rows")
+
+        # Build set of shops that have their own forecast row
+        fc_shop_set = set(fc["forecasted_shop"].unique())
+        print(f"[verify] distinct forecast shops: {len(fc_shop_set)}")
 
         # Read actuals.csv
         act_raw = pd.read_csv(S3.get_object(Bucket=CFG.bucket, Key=CFG.actuals_key)["Body"])
@@ -263,7 +278,15 @@ def lambda_handler(event, context):
         act_raw["forecast_product"] = act_raw["forecast_product"].astype(str).str.strip()
         act_raw["destination_region"] = act_raw["destination_region"].astype(str).str.strip()
         act_raw["forecasted_shop"] = act_raw["forecasted_shop"].astype(str).str.strip()
-        print(f"[verify] actuals.csv: {len(act_raw)} rows")
+        act_raw["shoptype"] = act_raw["shoptype"].astype(str).str.strip()
+
+        # ── Remap actuals shops to match forecast shops ───────────────
+        # If a shop exists in forecast.csv → keep as-is
+        # Otherwise → map to "Other [shoptype]"
+        has_fc = act_raw["forecasted_shop"].isin(fc_shop_set)
+        act_raw.loc[~has_fc, "forecasted_shop"] = "Other " + act_raw.loc[~has_fc, "shoptype"]
+        remapped = (~has_fc).sum()
+        print(f"[verify] actuals remapped to Other [shoptype]: {remapped} rows")
 
         t = int(act_raw["fulldate"].dt.year.max())
         print(f"[verify] year t = {t}")
@@ -380,7 +403,6 @@ def lambda_handler(event, context):
 
         current_row = 2
 
-        # EU+RoW section
         eu_prods = [(p, "EU+RoW") for p in products if "EU+RoW" in product_dests.get(p, [])]
         if eu_prods:
             current_row = write_section_header(ws_sum, current_row, "EU+RoW", max_c)
@@ -391,11 +413,9 @@ def lambda_handler(event, context):
                 )
                 current_row = write_block(ws_sum, current_row, product, all_weeks, *vals)
 
-        # 10 blank rows
         if eu_prods:
             current_row = write_blank_rows(ws_sum, current_row, 10, max_c)
 
-        # US+CA section
         us_prods = [(p, "US+CA") for p in products if "US+CA" in product_dests.get(p, [])]
         if us_prods:
             current_row = write_section_header(ws_sum, current_row, "US+CA", max_c)
@@ -407,6 +427,7 @@ def lambda_handler(event, context):
                 current_row = write_block(ws_sum, current_row, product, all_weeks, *vals)
 
         auto_width(ws_sum, len(all_weeks))
+        apply_pre_cutoff_gray(ws_sum, all_weeks, cutoff_week)
         apply_cutoff_border(ws_sum, all_weeks, cutoff_week)
         apply_week_grouping(ws_sum, all_weeks, cutoff_week)
         ws_sum.freeze_panes = "B2"
@@ -451,6 +472,7 @@ def lambda_handler(event, context):
                     current_row = write_block(ws, current_row, shop, all_weeks, *vals)
 
             auto_width(ws, len(all_weeks))
+            apply_pre_cutoff_gray(ws, all_weeks, cutoff_week)
             apply_cutoff_border(ws, all_weeks, cutoff_week)
             apply_week_grouping(ws, all_weeks, cutoff_week)
             ws.freeze_panes = "B2"
@@ -473,6 +495,7 @@ def lambda_handler(event, context):
             "products": len(products),
             "weeks": len(all_weeks),
             "cutoff_week": cutoff_week,
+            "actuals_remapped": int(remapped),
         }
 
     except Exception as e:
