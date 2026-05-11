@@ -162,7 +162,7 @@ def lambda_handler(event, context):
 
         metrics = [
             ("Actuals",  actuals_vals,   INTEGER_FMT),
-            ("Forecast", forecast_vals,  INTEGER_FMT),
+            ("F-YoY %",  fyoy_vals,      PERCENT_FMT),
             ("Error %",  error_pct_vals, PERCENT_FMT),
         ]
 
@@ -251,12 +251,7 @@ def lambda_handler(event, context):
 
     def compute_block_values(all_weeks, agg_act, agg_fc, agg_ly, key_prefix):
         _iso = datetime.date.today().isocalendar()
-        _wk = _iso[1] + 1
-        _yr = _iso[0]
-        if _wk > datetime.date(_yr, 12, 28).isocalendar()[1]:
-            _wk = 1
-            _yr += 1
-        current_week = f"{_yr}-{_wk:02d}"
+        current_week = f"{_iso[0]}-{_iso[1]:02d}"
 
         actuals_vals, forecast_vals, actuals_ly_vals = [], [], []
         fyoy_vals, yoy_vals, error_vals, error_pct_vals = [], [], [], []
@@ -267,7 +262,7 @@ def lambda_handler(event, context):
             f = get_val(agg_fc, key)
             a_ly = get_val(agg_ly, key)
 
-            if wk > current_week:
+            if wk >= current_week:
                 err = 0
                 err_pct = 0.0
             else:
