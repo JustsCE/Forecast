@@ -146,6 +146,46 @@ def lambda_handler(event, context):
 
         return current_row
 
+    def write_block_slim(ws, current_row, label, all_weeks, actuals_vals,
+                         forecast_vals, actuals_ly_vals, fyoy_vals, yoy_vals,
+                         error_vals, error_pct_vals):
+        max_c = len(all_weeks) + 1
+
+        cell = ws.cell(row=current_row, column=1, value=label)
+        cell.font = BOLD_FONT
+        cell.fill = WHITE_FILL
+        cell.border = HEADER_BOTTOM_BORDER
+        for c in range(2, max_c + 1):
+            ws.cell(row=current_row, column=c).fill = WHITE_FILL
+            ws.cell(row=current_row, column=c).border = HEADER_BOTTOM_BORDER
+        current_row += 1
+
+        metrics = [
+            ("Actuals", actuals_vals, INTEGER_FMT),
+            ("Error",   error_vals,   INTEGER_FMT),
+        ]
+
+        for metric_label, vals, fmt in metrics:
+            cell_label = ws.cell(row=current_row, column=1, value=metric_label)
+            cell_label.font = BOLD_FONT
+            cell_label.alignment = INDENT_ALIGN
+            cell_label.fill = WHITE_FILL
+
+            for wi, v in enumerate(vals):
+                c = wi + 2
+                cell = ws.cell(row=current_row, column=c, value=v)
+                cell.number_format = fmt
+                cell.alignment = RIGHT_ALIGN
+                cell.fill = WHITE_FILL
+
+            current_row += 1
+
+        for c in range(1, max_c + 1):
+            ws.cell(row=current_row, column=c).fill = WHITE_FILL
+        current_row += 1
+
+        return current_row
+
     def apply_cutoff_border(ws, all_weeks, cutoff_week):
         if cutoff_week not in all_weeks:
             return
@@ -558,6 +598,42 @@ def lambda_handler(event, context):
         apply_cutoff_border(ws_sum, all_weeks, cutoff_week)
         apply_week_grouping(ws_sum, all_weeks, cutoff_week)
         ws_sum.freeze_panes = "B2"
+
+        # ══════════════════════════════════════════════════════════════
+        #  SUMMARY 2 SHEET — Actuals + Error only
+        # ══════════════════════════════════════════════════════════════
+
+        ws_sum2 = wb.create_sheet(dedupe_sheet_name("Summary 2", used_names))
+        write_week_header_row(ws_sum2, all_weeks, row=1)
+
+        current_row = 2
+
+        if eu_prods:
+            current_row = write_section_header(ws_sum2, current_row, "EU+RoW", max_c)
+            for product, dest in eu_prods:
+                vals = compute_block_values(
+                    all_weeks, agg_act_prod, agg_fc_prod, agg_ly_prod,
+                    key_prefix=(dest, product),
+                )
+                current_row = write_block_slim(ws_sum2, current_row, product, all_weeks, *vals)
+
+        if eu_prods:
+            current_row = write_blank_rows(ws_sum2, current_row, 10, max_c)
+
+        if us_prods:
+            current_row = write_section_header(ws_sum2, current_row, "US+CA", max_c)
+            for product, dest in us_prods:
+                vals = compute_block_values(
+                    all_weeks, agg_act_prod, agg_fc_prod, agg_ly_prod,
+                    key_prefix=(dest, product),
+                )
+                current_row = write_block_slim(ws_sum2, current_row, product, all_weeks, *vals)
+
+        auto_width(ws_sum2, len(all_weeks))
+        apply_pre_cutoff_gray(ws_sum2, all_weeks, cutoff_week)
+        apply_cutoff_border(ws_sum2, all_weeks, cutoff_week)
+        apply_week_grouping(ws_sum2, all_weeks, cutoff_week)
+        ws_sum2.freeze_panes = "B2"
 
         # ══════════════════════════════════════════════════════════════
         #  PER-PRODUCT SHEETS — shop breakdown, split by region
