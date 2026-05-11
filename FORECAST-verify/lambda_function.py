@@ -163,6 +163,7 @@ def lambda_handler(event, context):
         metrics = [
             ("Actuals",  actuals_vals,   INTEGER_FMT),
             ("F-YoY %",  fyoy_vals,      PERCENT_FMT),
+            ("YoY %",    yoy_vals,       PERCENT_FMT),
             ("Error %",  error_pct_vals, PERCENT_FMT),
         ]
 
