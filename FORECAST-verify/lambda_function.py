@@ -1,5 +1,6 @@
 import re
 import json
+import datetime
 import urllib.request
 from io import BytesIO
 from dataclasses import dataclass
@@ -208,6 +209,9 @@ def lambda_handler(event, context):
         ws.column_dimensions["A"].width = max(18, ws.column_dimensions["A"].width)
 
     def compute_block_values(all_weeks, agg_act, agg_fc, agg_ly, key_prefix):
+        _iso = datetime.date.today().isocalendar()
+        current_week = f"{_iso[0]}-{_iso[1]:02d}"
+
         actuals_vals, forecast_vals, actuals_ly_vals = [], [], []
         fyoy_vals, yoy_vals, error_vals, error_pct_vals = [], [], [], []
 
@@ -217,10 +221,14 @@ def lambda_handler(event, context):
             f = get_val(agg_fc, key)
             a_ly = get_val(agg_ly, key)
 
-            err = a - f
+            if wk > current_week:
+                err = 0
+                err_pct = 0.0
+            else:
+                err = a - f
+                err_pct = (err / f) if f != 0 else 0.0
             fyoy = (f / a_ly - 1.0) if (f != 0 and a_ly != 0) else 0.0
             yoy = (a / a_ly - 1.0) if (a != 0 and a_ly != 0) else 0.0
-            err_pct = (err / f) if f != 0 else 0.0
 
             actuals_vals.append(a)
             forecast_vals.append(f)
