@@ -683,7 +683,21 @@ def lambda_handler(event, context):
             apply_week_grouping(ws, all_weeks, cutoff_week)
             ws.freeze_panes = "B2"
 
-        # ── Error threshold alerts ────────────────────────────────────
+        # ── Save to S3 ────────────────────────────────────────────────
+
+        buf = BytesIO()
+        wb.save(buf)
+        S3.put_object(
+            Bucket=CFG.bucket,
+            Key=CFG.out_key,
+            Body=buf.getvalue(),
+            ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        print(f"[verify] Wrote {len(products)} product sheets + Summary to s3://{CFG.bucket}/{CFG.out_key}")
+
+        # ── Slack: upload Excel + error alerts ────────────────────────
+        file_bytes = buf.getvalue()
+
         _iso = datetime.date.today().isocalendar()
         current_week = f"{_iso[0]}-{_iso[1]:02d}"
         completed_weeks = [w for w in all_weeks if w < current_week][-2:]
@@ -696,105 +710,76 @@ def lambda_handler(event, context):
             return 0.20
 
         # Compute product-level error per (dest, product) — sum across weeks
-        prod_errors = {}  # (dest, product) → {total_a, total_f, contributing_shops}
+        prod_errors = {}
         for product in products:
             for dest, shop in product_combos.get(product, set()):
                 total_a, total_f = 0.0, 0.0
                 for wk in completed_weeks:
-                    f = get_val(agg_forecast, (dest, shop, product, wk))
-                    a = get_val(agg_actuals, (dest, shop, product, wk))
-                    total_a += a
-                    total_f += f
+                    total_f += get_val(agg_forecast, (dest, shop, product, wk))
+                    total_a += get_val(agg_actuals, (dest, shop, product, wk))
                 if total_f == 0:
                     continue
-                err_pct = (total_a - total_f) / total_f
-                if err_pct == -1.0:
+                err = (total_a - total_f) / total_f
+                if err == -1.0:
                     continue
                 key = (dest, product)
                 if key not in prod_errors:
                     prod_errors[key] = {"total_a": 0.0, "total_f": 0.0, "shops": []}
                 prod_errors[key]["total_a"] += total_a
                 prod_errors[key]["total_f"] += total_f
-                # Track contributing shops that individually breach
-                if abs(err_pct) > 0:
-                    prod_errors[key]["shops"].append((shop, err_pct))
+                if abs(err) > 0:
+                    prod_errors[key]["shops"].append((shop, err))
 
-        # Build alerts per region, ranked within each region
         def build_region_alerts(region):
-            region_items = []
+            items = []
             for (dest, product), data in prod_errors.items():
                 if dest != region or data["total_f"] == 0:
                     continue
                 err = (data["total_a"] - data["total_f"]) / data["total_f"]
                 if err == -1.0:
                     continue
-                region_items.append({
-                    "product": product, "dest": dest,
-                    "err_pct": err, "abs_err": abs(err),
-                    "shops": data["shops"],
-                })
-            # Rank by abs error descending within this region
-            region_items.sort(key=lambda x: x["abs_err"], reverse=True)
+                items.append({"product": product, "err": err, "abs_err": abs(err), "shops": data["shops"]})
+            items.sort(key=lambda x: x["abs_err"], reverse=True)
             alerts = []
-            for rank, item in enumerate(region_items, 1):
+            for rank, item in enumerate(items, 1):
                 threshold = get_threshold(rank)
                 if item["abs_err"] > threshold:
-                    # Contributing shops = those that individually exceed threshold
-                    contrib = sorted(
-                        [(s, e) for s, e in item["shops"] if abs(e) > threshold],
-                        key=lambda x: abs(x[1]), reverse=True,
-                    )
-                    direction = "overforecasted" if item["err_pct"] < 0 else "underforecasted"
-                    alerts.append({
-                        "product": item["product"],
-                        "err_pct": item["err_pct"],
-                        "abs_err": item["abs_err"],
-                        "threshold": threshold,
-                        "direction": direction,
-                        "contrib": contrib,
-                        "tier": "TOP" if rank <= 10 else ("MID" if rank <= 40 else "LOW"),
-                    })
+                    contrib = [s for s, e in item["shops"] if abs(e) > threshold]
+                    direction = "overforecasted" if item["err"] < 0 else "underforecasted"
+                    tier = "TOP" if rank <= 10 else ("MID" if rank <= 40 else "LOW")
+                    alerts.append({"product": item["product"], "abs_err": item["abs_err"],
+                                   "direction": direction, "threshold": threshold,
+                                   "tier": tier, "contrib": contrib})
             return alerts
 
-        eu_alerts = build_region_alerts("EU+RoW")
-        us_alerts = build_region_alerts("US+CA")
-        total_alerts = len(eu_alerts) + len(us_alerts)
-        print(f"[verify] {total_alerts} threshold breaches (checked weeks: {completed_weeks})")
-
-        def format_region_message(region, alerts):
+        def format_region(region, alerts):
             if not alerts:
                 return None
             lines = [f"*{region} — Forecast Error Alert ({', '.join(completed_weeks)})*"]
             current_tier = None
             tier_labels = {"TOP": "10%", "MID": "15%", "LOW": "20%"}
-            counter = 0
+            n = 0
             for a in alerts:
                 if a["tier"] != current_tier:
                     current_tier = a["tier"]
-                    lines.append("")
-                    lines.append(f"*{current_tier} Products ({tier_labels[current_tier]} error):*")
-                counter += 1
-                shop_names = ", ".join(s for s, _ in a["contrib"]) if a["contrib"] else "all channels"
-                lines.append(
-                    f"{counter}. *{a['product']}* — {a['abs_err']:.1%} {a['direction']}"
-                    f" — channels: {shop_names}"
-                )
+                    lines.append(f"\n*{current_tier} Products ({tier_labels[current_tier]} error):*")
+                n += 1
+                shops = ", ".join(a["contrib"]) if a["contrib"] else "all channels"
+                lines.append(f"{n}. *{a['product']}* — {a['abs_err']:.1%} {a['direction']} — channels: {shops}")
             return "\n".join(lines)
 
-        # ── Save to S3 ────────────────────────────────────────────────
+        eu_alerts = build_region_alerts("EU+RoW")
+        us_alerts = build_region_alerts("US+CA")
+        eu_text = format_region("EU+RoW", eu_alerts)
+        us_text = format_region("US+CA", us_alerts)
 
-        buf = BytesIO()
-        wb.save(buf)
-        file_bytes = buf.getvalue()
-        S3.put_object(
-            Bucket=CFG.bucket,
-            Key=CFG.out_key,
-            Body=file_bytes,
-            ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-        print(f"[verify] Wrote {len(products)} product sheets + Summary to s3://{CFG.bucket}/{CFG.out_key}")
-
-        # ── Upload Excel + alerts to Slack (uses files:write scope) ──
+        # Combine into one message
+        parts = []
+        if eu_text:
+            parts.append(eu_text)
+        if us_text:
+            parts.append(us_text)
+        alert_comment = "\n\n".join(parts) if parts else "No threshold breaches detected."
 
         try:
             ssm = boto3.client("ssm")
@@ -819,46 +804,24 @@ def lambda_handler(event, context):
                     raise RuntimeError(f"Slack {method}: {resp.get('error', resp)}")
                 return resp
 
-            def upload_file_with_comment(file_data, filename, comment_text):
-                """Upload a file to Slack channel with initial_comment."""
-                init = slack_api("files.getUploadURLExternal", {
-                    "filename": filename,
-                    "length": len(file_data),
-                })
-                upload_req = urllib.request.Request(
-                    init["upload_url"], data=file_data,
-                    headers={"Content-Type": "application/octet-stream"},
-                    method="POST",
-                )
-                urllib.request.urlopen(upload_req, timeout=30)
-                slack_api("files.completeUploadExternal", {
-                    "files": json.dumps([{"id": init["file_id"], "title": filename}]),
-                    "channel_id": channel,
-                    "initial_comment": comment_text,
-                })
-
-            # Message 1: Excel file with neutral title
-            upload_file_with_comment(
-                file_bytes,
-                "verify_actuals_vs_forecast.xlsx",
-                f"*Actuals vs Forecast — {datetime.date.today().strftime('%b %d, %Y')}*",
+            # Upload Excel with alert text as initial_comment
+            init = slack_api("files.getUploadURLExternal", {
+                "filename": "verify_actuals_vs_forecast.xlsx",
+                "length": len(file_bytes),
+            })
+            upload_req = urllib.request.Request(
+                init["upload_url"], data=file_bytes,
+                headers={"Content-Type": "application/octet-stream"},
+                method="POST",
             )
-            print("[verify] uploaded Excel to Slack")
-
-            # Message 2: EU+RoW alerts (text via tiny file workaround)
-            eu_text = format_region_message("EU+RoW", eu_alerts)
-            if eu_text:
-                upload_file_with_comment(b" ", "eu_alert.txt", eu_text)
-                print("[verify] posted EU+RoW alerts")
-
-            # Message 3: US+CA alerts
-            us_text = format_region_message("US+CA", us_alerts)
-            if us_text:
-                upload_file_with_comment(b" ", "us_alert.txt", us_text)
-                print("[verify] posted US+CA alerts")
-
-            print(f"[verify] {total_alerts} total alerts sent")
-
+            urllib.request.urlopen(upload_req, timeout=30)
+            slack_api("files.completeUploadExternal", {
+                "files": json.dumps([{"id": init["file_id"], "title": "verify_actuals_vs_forecast.xlsx"}]),
+                "channel_id": channel,
+                "initial_comment": alert_comment,
+            })
+            total = len(eu_alerts) + len(us_alerts)
+            print(f"[verify] uploaded Excel + {total} alerts to Slack")
         except Exception as slack_err:
             print(f"[verify] Slack upload failed: {slack_err}")
 
@@ -869,7 +832,7 @@ def lambda_handler(event, context):
             "weeks": len(all_weeks),
             "cutoff_week": cutoff_week,
             "other_residual_rows_t": len(other_rows_t),
-            "alerts": total_alerts,
+            "alerts": len(eu_alerts) + len(us_alerts),
         }
 
     except Exception as e:
