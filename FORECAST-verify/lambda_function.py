@@ -538,6 +538,7 @@ def lambda_handler(event, context):
             fc_t[shop_grp].drop_duplicates()
             .apply(lambda r: (r["destination_region"], r["forecasted_shop"], r["forecast_product"]), axis=1)
         )
+        fc_combos = {(d, s, p) for d, s, p in fc_combos if s != "Unassigned"}
 
         product_combos = {}
         for dest, shop, prod in fc_combos:
@@ -744,7 +745,7 @@ def lambda_handler(event, context):
             for rank, item in enumerate(items, 1):
                 threshold = get_threshold(rank)
                 if item["abs_err"] > threshold:
-                    contrib = [s for s, e in item["shops"] if abs(e) > threshold]
+                    contrib = [s for s, e in item["shops"] if abs(e) > 0.10]
                     direction = "overforecasted" if item["err"] < 0 else "underforecasted"
                     tier = "TOP" if rank <= 10 else ("MID" if rank <= 40 else "LOW")
                     alerts.append({"product": item["product"], "abs_err": item["abs_err"],
