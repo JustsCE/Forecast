@@ -20,6 +20,7 @@ def lambda_handler(event, context):
         forecast_key: str = "Forecast/forecast.csv"
         actuals_key: str = "Forecast/actuals.csv"
         input_key: str = "Forecast/Forecast_Input.xlsx"
+        combined_key: str = "Forecast/Seperate Forecasts/seperate_forecasts_combined.csv"
         out_key: str = "Forecast/verify_actuals_vs_forecast.xlsx"
 
     CFG = Config()
@@ -101,10 +102,32 @@ def lambda_handler(event, context):
             ws.cell(row=current_row, column=c).fill = WHITE_FILL
         return current_row + 1
 
+    def _apply_block_cutoff(ws, block_start_row, block_end_row, all_weeks, cutoff_week):
+        """Apply gray fill + cutoff border to rows [block_start_row, block_end_row) for a single block."""
+        if not cutoff_week or cutoff_week not in all_weeks:
+            return
+        cutoff_col = all_weeks.index(cutoff_week) + 2  # 1-indexed, col 1 = labels
+        max_c = len(all_weeks) + 1
+        # Gray out columns up to and including cutoff
+        for r in range(block_start_row, block_end_row):
+            for c in range(1, cutoff_col + 1):
+                cell = ws.cell(row=r, column=c)
+                cell.fill = GRAY_FILL
+                if cell.font and cell.font.bold:
+                    cell.font = GRAY_FONT_BOLD
+                else:
+                    cell.font = GRAY_FONT
+        # Thick right border on cutoff column
+        for r in range(block_start_row, block_end_row):
+            cell = ws.cell(row=r, column=cutoff_col)
+            b = cell.border or Border()
+            cell.border = Border(left=b.left, right=THICK, top=b.top, bottom=b.bottom)
+
     def write_block(ws, current_row, label, all_weeks, actuals_vals,
                     forecast_vals, actuals_ly_vals, fyoy_vals, yoy_vals,
-                    error_vals, error_pct_vals):
+                    error_vals, error_pct_vals, cutoff_week=None):
         max_c = len(all_weeks) + 1
+        block_start = current_row
 
         cell = ws.cell(row=current_row, column=1, value=label)
         cell.font = BOLD_FONT
@@ -144,12 +167,14 @@ def lambda_handler(event, context):
             ws.cell(row=current_row, column=c).fill = WHITE_FILL
         current_row += 1
 
+        _apply_block_cutoff(ws, block_start, current_row, all_weeks, cutoff_week)
         return current_row
 
     def write_block_slim(ws, current_row, label, all_weeks, actuals_vals,
                          forecast_vals, actuals_ly_vals, fyoy_vals, yoy_vals,
-                         error_vals, error_pct_vals):
+                         error_vals, error_pct_vals, cutoff_week=None):
         max_c = len(all_weeks) + 1
+        block_start = current_row
 
         cell = ws.cell(row=current_row, column=1, value=label)
         cell.font = BOLD_FONT
@@ -186,34 +211,8 @@ def lambda_handler(event, context):
             ws.cell(row=current_row, column=c).fill = WHITE_FILL
         current_row += 1
 
+        _apply_block_cutoff(ws, block_start, current_row, all_weeks, cutoff_week)
         return current_row
-
-    def apply_cutoff_border(ws, all_weeks, cutoff_week):
-        if cutoff_week not in all_weeks:
-            return
-        col_idx = all_weeks.index(cutoff_week) + 2
-        for r in range(1, ws.max_row + 1):
-            cell = ws.cell(row=r, column=col_idx)
-            b = cell.border or Border()
-            cell.border = Border(left=b.left, right=THICK, top=b.top, bottom=b.bottom)
-
-    def apply_pre_cutoff_gray(ws, all_weeks, cutoff_week):
-        """Gray out all cells (fill + font) in columns before the cutoff week."""
-        if cutoff_week not in all_weeks:
-            return
-        cutoff_col = all_weeks.index(cutoff_week) + 2  # col index of cutoff week
-        # Gray columns: from col 1 (labels) through cutoff_col (inclusive)
-        for r in range(1, ws.max_row + 1):
-            for c in range(1, cutoff_col + 1):
-                cell = ws.cell(row=r, column=c)
-                cell.fill = GRAY_FILL
-                # Preserve bold on label/header cells
-                if cell.font and cell.font.bold:
-                    cell.font = GRAY_FONT_BOLD
-                else:
-                    cell.font = GRAY_FONT
-                # Preserve existing borders
-                # (cutoff border applied separately after this)
 
     def apply_week_grouping(ws, all_weeks, cutoff_week):
         if cutoff_week not in all_weeks:
@@ -250,9 +249,16 @@ def lambda_handler(event, context):
             ws.column_dimensions[get_column_letter(c)].width = max(10, min(18, max_len + 2))
         ws.column_dimensions["A"].width = max(18, ws.column_dimensions["A"].width)
 
-    def compute_block_values(all_weeks, agg_act, agg_fc, agg_ly, key_prefix):
-        _iso = datetime.date.today().isocalendar()
-        current_week = f"{_iso[0]}-{_iso[1]:02d}"
+    def ts_to_iso_week(ts):
+        """Convert a datetime/Timestamp to 'YYYY-WW' ISO week string."""
+        if pd.isna(ts):
+            return None
+        if hasattr(ts, 'isocalendar'):
+            iso = ts.isocalendar()
+            return f"{iso[0]}-{iso[1]:02d}"
+        return None
+
+    def compute_block_values(all_weeks, agg_act, agg_fc, agg_ly, key_prefix, cutoff_week=None):
 
         actuals_vals, forecast_vals, actuals_ly_vals = [], [], []
         fyoy_vals, yoy_vals, error_vals, error_pct_vals = [], [], [], []
@@ -263,7 +269,7 @@ def lambda_handler(event, context):
             f = get_val(agg_fc, key)
             a_ly = get_val(agg_ly, key)
 
-            if wk >= current_week:
+            if cutoff_week and wk >= cutoff_week:
                 err = 0
                 err_pct = 0.0
             else:
@@ -299,6 +305,28 @@ def lambda_handler(event, context):
         info = pd.read_excel(BytesIO(input_bytes), sheet_name="info", header=None)
         cutoff_week = str(info.iat[1, 2]).strip()
         print(f"[verify] cutoff_week: {cutoff_week}")
+
+        # ── Per-shop submission timestamps ───────────────────────────────
+        # Read combined CSV for per-shop submission dates
+        combined_raw = pd.read_csv(
+            S3.get_object(Bucket=CFG.bucket, Key=CFG.combined_key)["Body"],
+            usecols=["forecasted_shop", "source_timestamp"],
+        )
+        combined_raw["source_timestamp"] = pd.to_datetime(
+            combined_raw["source_timestamp"], utc=True, errors="coerce"
+        )
+        shop_submit_ts = combined_raw.groupby("forecasted_shop")["source_timestamp"].max()
+        shop_cutoff_week = {
+            shop: ts_to_iso_week(ts)
+            for shop, ts in shop_submit_ts.items()
+            if pd.notna(ts)
+        }
+        print(f"[verify] per-shop cutoffs: {len(shop_cutoff_week)} shops from combined CSV")
+
+        # For remaining (calculated) shops: use forecast.csv LastModified
+        fc_meta = S3.head_object(Bucket=CFG.bucket, Key=CFG.forecast_key)
+        remaining_cutoff = ts_to_iso_week(fc_meta["LastModified"])
+        print(f"[verify] remaining_cutoff (forecast.csv LastModified): {remaining_cutoff}")
 
         # Read forecast.csv
         fc = pd.read_csv(S3.get_object(Bucket=CFG.bucket, Key=CFG.forecast_key)["Body"])
@@ -554,6 +582,15 @@ def lambda_handler(event, context):
         )
         print(f"[verify] products: {len(products)} (sorted by YTD)")
 
+        # ── Build per-product cutoff (earliest shop cutoff per dest×product) ─
+        prod_cutoff = {}
+        for dest, shop, prod in fc_combos:
+            shop_co = shop_cutoff_week.get(shop, remaining_cutoff)
+            key = (dest, prod)
+            if key not in prod_cutoff or (shop_co and (prod_cutoff[key] is None or shop_co < prod_cutoff[key])):
+                prod_cutoff[key] = shop_co
+        print(f"[verify] product-level cutoffs: {len(prod_cutoff)} combos")
+
         # ── Build Excel workbook ──────────────────────────────────────
 
         wb = Workbook()
@@ -573,14 +610,18 @@ def lambda_handler(event, context):
         current_row = 2
 
         eu_prods = [(p, "EU+RoW") for p in products if "EU+RoW" in product_dests.get(p, [])]
+        all_sum_cutoffs = []
         if eu_prods:
             current_row = write_section_header(ws_sum, current_row, "EU+RoW", max_c)
             for product, dest in eu_prods:
+                pco = prod_cutoff.get((dest, product))
                 vals = compute_block_values(
                     all_weeks, agg_act_prod, agg_fc_prod, agg_ly_prod,
-                    key_prefix=(dest, product),
+                    key_prefix=(dest, product), cutoff_week=pco,
                 )
-                current_row = write_block(ws_sum, current_row, product, all_weeks, *vals)
+                current_row = write_block(ws_sum, current_row, product, all_weeks, *vals, cutoff_week=pco)
+                if pco:
+                    all_sum_cutoffs.append(pco)
 
         if eu_prods:
             current_row = write_blank_rows(ws_sum, current_row, 10, max_c)
@@ -589,16 +630,20 @@ def lambda_handler(event, context):
         if us_prods:
             current_row = write_section_header(ws_sum, current_row, "US+CA", max_c)
             for product, dest in us_prods:
+                pco = prod_cutoff.get((dest, product))
                 vals = compute_block_values(
                     all_weeks, agg_act_prod, agg_fc_prod, agg_ly_prod,
-                    key_prefix=(dest, product),
+                    key_prefix=(dest, product), cutoff_week=pco,
                 )
-                current_row = write_block(ws_sum, current_row, product, all_weeks, *vals)
+                current_row = write_block(ws_sum, current_row, product, all_weeks, *vals, cutoff_week=pco)
+                if pco:
+                    all_sum_cutoffs.append(pco)
 
         auto_width(ws_sum, len(all_weeks))
-        apply_pre_cutoff_gray(ws_sum, all_weeks, cutoff_week)
-        apply_cutoff_border(ws_sum, all_weeks, cutoff_week)
-        apply_week_grouping(ws_sum, all_weeks, cutoff_week)
+        # Week grouping uses earliest cutoff across all blocks on the sheet
+        earliest_sum = min(all_sum_cutoffs) if all_sum_cutoffs else None
+        if earliest_sum:
+            apply_week_grouping(ws_sum, all_weeks, earliest_sum)
         ws_sum.freeze_panes = "B2"
 
         # ══════════════════════════════════════════════════════════════
@@ -610,14 +655,18 @@ def lambda_handler(event, context):
 
         current_row = 2
 
+        all_sum2_cutoffs = []
         if eu_prods:
             current_row = write_section_header(ws_sum2, current_row, "EU+RoW", max_c)
             for product, dest in eu_prods:
+                pco = prod_cutoff.get((dest, product))
                 vals = compute_block_values(
                     all_weeks, agg_act_prod, agg_fc_prod, agg_ly_prod,
-                    key_prefix=(dest, product),
+                    key_prefix=(dest, product), cutoff_week=pco,
                 )
-                current_row = write_block_slim(ws_sum2, current_row, product, all_weeks, *vals)
+                current_row = write_block_slim(ws_sum2, current_row, product, all_weeks, *vals, cutoff_week=pco)
+                if pco:
+                    all_sum2_cutoffs.append(pco)
 
         if eu_prods:
             current_row = write_blank_rows(ws_sum2, current_row, 10, max_c)
@@ -625,16 +674,19 @@ def lambda_handler(event, context):
         if us_prods:
             current_row = write_section_header(ws_sum2, current_row, "US+CA", max_c)
             for product, dest in us_prods:
+                pco = prod_cutoff.get((dest, product))
                 vals = compute_block_values(
                     all_weeks, agg_act_prod, agg_fc_prod, agg_ly_prod,
-                    key_prefix=(dest, product),
+                    key_prefix=(dest, product), cutoff_week=pco,
                 )
-                current_row = write_block_slim(ws_sum2, current_row, product, all_weeks, *vals)
+                current_row = write_block_slim(ws_sum2, current_row, product, all_weeks, *vals, cutoff_week=pco)
+                if pco:
+                    all_sum2_cutoffs.append(pco)
 
         auto_width(ws_sum2, len(all_weeks))
-        apply_pre_cutoff_gray(ws_sum2, all_weeks, cutoff_week)
-        apply_cutoff_border(ws_sum2, all_weeks, cutoff_week)
-        apply_week_grouping(ws_sum2, all_weeks, cutoff_week)
+        earliest_sum2 = min(all_sum2_cutoffs) if all_sum2_cutoffs else None
+        if earliest_sum2:
+            apply_week_grouping(ws_sum2, all_weeks, earliest_sum2)
         ws_sum2.freeze_panes = "B2"
 
         # ══════════════════════════════════════════════════════════════
@@ -654,15 +706,19 @@ def lambda_handler(event, context):
             us_combos = sorted((d, s) for d, s in combos if d == "US+CA")
 
             current_row = 2
+            sheet_cutoffs = []
 
             if eu_combos:
                 current_row = write_section_header(ws, current_row, "EU+RoW", max_c)
                 for dest, shop in eu_combos:
+                    sco = shop_cutoff_week.get(shop, remaining_cutoff)
                     vals = compute_block_values(
                         all_weeks, agg_actuals, agg_forecast, agg_actuals_ly,
-                        key_prefix=(dest, shop, product),
+                        key_prefix=(dest, shop, product), cutoff_week=sco,
                     )
-                    current_row = write_block(ws, current_row, shop, all_weeks, *vals)
+                    current_row = write_block(ws, current_row, shop, all_weeks, *vals, cutoff_week=sco)
+                    if sco:
+                        sheet_cutoffs.append(sco)
 
             if eu_combos and us_combos:
                 current_row = write_blank_rows(ws, current_row, 10, max_c)
@@ -670,16 +726,19 @@ def lambda_handler(event, context):
             if us_combos:
                 current_row = write_section_header(ws, current_row, "US+CA", max_c)
                 for dest, shop in us_combos:
+                    sco = shop_cutoff_week.get(shop, remaining_cutoff)
                     vals = compute_block_values(
                         all_weeks, agg_actuals, agg_forecast, agg_actuals_ly,
-                        key_prefix=(dest, shop, product),
+                        key_prefix=(dest, shop, product), cutoff_week=sco,
                     )
-                    current_row = write_block(ws, current_row, shop, all_weeks, *vals)
+                    current_row = write_block(ws, current_row, shop, all_weeks, *vals, cutoff_week=sco)
+                    if sco:
+                        sheet_cutoffs.append(sco)
 
             auto_width(ws, len(all_weeks))
-            apply_pre_cutoff_gray(ws, all_weeks, cutoff_week)
-            apply_cutoff_border(ws, all_weeks, cutoff_week)
-            apply_week_grouping(ws, all_weeks, cutoff_week)
+            earliest_sheet = min(sheet_cutoffs) if sheet_cutoffs else None
+            if earliest_sheet:
+                apply_week_grouping(ws, all_weeks, earliest_sheet)
             ws.freeze_panes = "B2"
 
         # ── Save to S3 ────────────────────────────────────────────────
