@@ -2,6 +2,7 @@ import re
 import json
 import datetime
 import urllib.request
+import urllib.parse
 from io import BytesIO
 from dataclasses import dataclass
 from typing import List, Tuple
@@ -713,50 +714,85 @@ def lambda_handler(event, context):
 
         print(f"[verify] {len(alerts)} threshold breaches (checked weeks: {completed_weeks})")
 
-        if alerts:
-            try:
-                ssm = boto3.client("ssm")
-                slack_token = ssm.get_parameter(
-                    Name="/forecast/slack-bot-token", WithDecryption=True
-                )["Parameter"]["Value"]
-                channel = ssm.get_parameter(
-                    Name="/forecast/slack-channel-id"
-                )["Parameter"]["Value"]
-
-                lines = [f":warning: *Forecast Error Alert — {datetime.date.today().strftime('%b %d, %Y')}*",
-                         f"Checked weeks: {', '.join(completed_weeks)}", ""]
-                for a in alerts:
-                    lines.append(
-                        f"• *{a['product']}* ({a['dest']}) — "
-                        f"{a['avg_err']:.1%} avg error (limit: {a['threshold']:.0%}, rank #{a['rank']})"
-                    )
-                alert_text = "\n".join(lines)
-
-                req = urllib.request.Request(
-                    "https://slack.com/api/chat.postMessage",
-                    data=json.dumps({"channel": channel, "text": alert_text}).encode(),
-                    headers={
-                        "Content-Type": "application/json",
-                        "Authorization": f"Bearer {slack_token}",
-                    },
-                    method="POST",
-                )
-                urllib.request.urlopen(req, timeout=10)
-                print(f"[verify] posted {len(alerts)} alerts to Slack")
-            except Exception as slack_err:
-                print(f"[verify] Slack alert failed: {slack_err}")
-
         # ── Save to S3 ────────────────────────────────────────────────
 
         buf = BytesIO()
         wb.save(buf)
+        file_bytes = buf.getvalue()
         S3.put_object(
             Bucket=CFG.bucket,
             Key=CFG.out_key,
-            Body=buf.getvalue(),
+            Body=file_bytes,
             ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
         print(f"[verify] Wrote {len(products)} product sheets + Summary to s3://{CFG.bucket}/{CFG.out_key}")
+
+        # ── Upload Excel + alerts to Slack (uses files:write scope) ──
+
+        try:
+            ssm = boto3.client("ssm")
+            slack_token = ssm.get_parameter(
+                Name="/forecast/slack-bot-token", WithDecryption=True
+            )["Parameter"]["Value"]
+            channel = ssm.get_parameter(
+                Name="/forecast/slack-channel-id"
+            )["Parameter"]["Value"]
+
+            # Build comment text
+            comment_lines = [f"*Actuals vs Forecast — {datetime.date.today().strftime('%b %d, %Y')}*"]
+            if alerts:
+                comment_lines.append("")
+                comment_lines.append(f":warning: *{len(alerts)} threshold breaches* (weeks: {', '.join(completed_weeks)})")
+                comment_lines.append("")
+                for a in alerts:
+                    comment_lines.append(
+                        f"• *{a['product']}* ({a['dest']}) — "
+                        f"{a['avg_err']:.1%} avg error (limit: {a['threshold']:.0%}, rank #{a['rank']})"
+                    )
+            else:
+                comment_lines.append("No threshold breaches detected.")
+            comment = "\n".join(comment_lines)
+
+            def slack_api(method, fields):
+                body = urllib.parse.urlencode(fields).encode()
+                req = urllib.request.Request(
+                    f"https://slack.com/api/{method}",
+                    data=body,
+                    headers={"Authorization": f"Bearer {slack_token}",
+                             "Content-Type": "application/x-www-form-urlencoded"},
+                    method="POST",
+                )
+                resp = json.loads(urllib.request.urlopen(req, timeout=15).read())
+                if not resp.get("ok"):
+                    raise RuntimeError(f"Slack {method}: {resp.get('error', resp)}")
+                return resp
+
+            # Step 1: get upload URL
+            init = slack_api("files.getUploadURLExternal", {
+                "filename": "verify_actuals_vs_forecast.xlsx",
+                "length": len(file_bytes),
+            })
+            upload_url = init["upload_url"]
+            file_id = init["file_id"]
+
+            # Step 2: upload bytes
+            upload_req = urllib.request.Request(
+                upload_url, data=file_bytes,
+                headers={"Content-Type": "application/octet-stream"},
+                method="POST",
+            )
+            urllib.request.urlopen(upload_req, timeout=30)
+
+            # Step 3: complete + share to channel
+            slack_api("files.completeUploadExternal", {
+                "files": json.dumps([{"id": file_id, "title": "verify_actuals_vs_forecast.xlsx"}]),
+                "channel_id": channel,
+                "initial_comment": comment,
+            })
+            print(f"[verify] uploaded Excel + {len(alerts)} alerts to Slack channel {channel}")
+
+        except Exception as slack_err:
+            print(f"[verify] Slack upload failed: {slack_err}")
 
         return {
             "ok": True,
