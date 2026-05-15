@@ -304,8 +304,8 @@ def lambda_handler(event, context):
         # Read forecast.csv
         fc = pd.read_csv(S3.get_object(Bucket=CFG.bucket, Key=CFG.forecast_key)["Body"])
         fc["forecasted_shop"] = fc["forecasted_shop"].astype(str).str.strip()
-        fc.loc[fc["forecasted_shop"].isin(["", "nan", "None"]), "forecasted_shop"] = "Unassigned"
-        fc["forecasted_shop"] = fc["forecasted_shop"].fillna("Unassigned")
+        _blank = fc["forecasted_shop"].isin(["", "nan", "None"])
+        fc.loc[_blank, "forecasted_shop"] = "Remaining " + fc.loc[_blank, "shoptype"].astype(str).str.strip()
         fc["FQTY"] = to_num(fc["FQTY"])
         fc["iso_week"] = fc["iso_week"].astype(str).str.strip()
         fc["forecast_product"] = fc["forecast_product"].astype(str).str.strip()
@@ -313,10 +313,10 @@ def lambda_handler(event, context):
         fc["shoptype"] = fc["shoptype"].astype(str).str.strip() if "shoptype" in fc.columns else ""
         print(f"[verify] forecast.csv: {len(fc)} rows")
 
-        # Named forecast shops (excluding "Other *" and "Unassigned")
+        # Named forecast shops (excluding "Other *" and "Remaining *")
         fc_named_shops = set(
             s for s in fc["forecasted_shop"].unique()
-            if not s.startswith("Other ") and s != "Unassigned"
+            if not s.startswith("Other ") and not s.startswith("Remaining ")
         )
         # "Other [shoptype]" entries in forecast
         fc_other_shops = set(
@@ -538,7 +538,6 @@ def lambda_handler(event, context):
             fc_t[shop_grp].drop_duplicates()
             .apply(lambda r: (r["destination_region"], r["forecasted_shop"], r["forecast_product"]), axis=1)
         )
-        fc_combos = {(d, s, p) for d, s, p in fc_combos if s != "Unassigned"}
 
         product_combos = {}
         for dest, shop, prod in fc_combos:
