@@ -1,5 +1,3 @@
 __pycache__/
 .pytest_cache/
 norde/forecast/
-norde/build/
-norde/function.zip

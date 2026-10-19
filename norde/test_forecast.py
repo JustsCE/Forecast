@@ -69,6 +69,17 @@ def test_submit(actuals):
             F.submit([bad], actuals, subs)
 
 
+def test_run(tmp_path, monkeypatch, actuals):
+    import run
+    monkeypatch.setattr(run, "DIR", tmp_path)
+    result = {"results": [{"tables": [{"rows": [{"[l]": l, "[e]": e, "[m]": m, "[a]": a} for (e, l, m), a in actuals.items()]}]}]}
+    assert run.main("actuals", result)["months"] == ["2025-01", "2026-10"]
+    out = run.main("submit", {"note": "t", "rows": [{"entity": "02.1", "line": "1.1", "month": "2026-11", "amount": 5}]})
+    assert out["submitted"][0]["amount"] == 5 and out["build"]["submissions"] == 1 and (tmp_path / "NORDE-forecast.xlsx").exists()
+    assert run.main("submit", {"rows": [{"entity": "X", "line": "1.1", "month": "2026-11", "amount": 5}]}) == {"error": "unknown entity/division 'X'"}
+    assert '>= "2025-01"' in run.main("dax")["dax"] or '>= "' in run.main("dax")["dax"]
+
+
 def test_workbook(actuals):
     subs = {("02.1", REV, "2026-11"): 300.0, ("02.2", REV, "2026-11"): 300.0}
     wb = load_workbook(BytesIO(W.build(actuals, subs)))
