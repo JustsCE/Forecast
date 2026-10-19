@@ -1,9 +1,10 @@
 """NORDE forecast CLI — JSON in (stdin), JSON out (stdout), files in NORDE_DIR (default ./forecast).
 
-python run.py dax [since]            the DAX to run with powerbi_run_dax (default since = Jan t-1)
-python run.py actuals < result.json  refresh actuals.csv from the powerbi_run_dax result (months >= earliest pulled replaced)
-python run.py submit  < rows.json    {"note": "...", "rows": [{entity|division|TOTAL, line, month, amount|yoy}]} -> forecast.csv, then build
-python run.py build                  write NORDE-forecast.xlsx
+python run.py dax [since]              the DAX to run with powerbi_run_dax (default since = Jan t-2)
+python run.py actuals < result.json    refresh actuals.csv from the powerbi_run_dax result (months >= earliest pulled replaced)
+python run.py submit  < rows.json      {"note": "...", "rows": [{entity|division|TOTAL, line, month, amount|yoy}]} -> forecast.csv, then build
+python run.py build [scope]            write NORDE-forecast[-<scope>].xlsx; scope = TOTAL (default) | division | entity code
+python run.py publish <scope> <id>     upload that xlsx into the Google Sheet <id> in place (GOOGLE_SERVICE_ACCOUNT = key file)
 """
 import csv
 import json
@@ -17,7 +18,9 @@ import forecast as F
 import workbook as W
 
 DIR = Path(os.environ.get("NORDE_DIR", "forecast"))
-ACTUALS, FORECAST, XLSX = "actuals.csv", "forecast.csv", "NORDE-forecast.xlsx"
+ACTUALS, FORECAST = "actuals.csv", "forecast.csv"
+XLSX = lambda scope: "NORDE-forecast.xlsx" if scope == "TOTAL" else f"NORDE-forecast-{scope}.xlsx"
+XLSX_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 def rows(name):
@@ -40,16 +43,28 @@ def load():
     return actuals, subs
 
 
-def build():
+def build(scope="TOTAL"):
     actuals, subs = load()
-    (DIR / XLSX).write_bytes(W.build(actuals, subs))
+    (DIR / XLSX(scope)).write_bytes(W.build(actuals, subs, scope))
     current = F.current_month(actuals)
-    return {"file": str(DIR / XLSX), "current": current, "horizon": [current, F.horizon(current)[-1]], "submissions": len(subs)}
+    return {"file": str(DIR / XLSX(scope)), "scope": scope, "current": current, "horizon": [current, F.horizon(current)[-1]], "submissions": len(subs)}
+
+
+def publish(scope, file_id):
+    """Drive files.update with xlsx media: Google converts it into the existing Sheet, id and link unchanged."""
+    import urllib.request
+    from google.auth.transport.requests import Request
+    from google.oauth2 import service_account
+    creds = service_account.Credentials.from_service_account_file(os.environ["GOOGLE_SERVICE_ACCOUNT"], scopes=["https://www.googleapis.com/auth/drive"])
+    creds.refresh(Request())
+    req = urllib.request.Request(f"https://www.googleapis.com/upload/drive/v3/files/{file_id}?uploadType=media", method="PATCH",
+                                 data=(DIR / XLSX(scope)).read_bytes(), headers={"Authorization": f"Bearer {creds.token}", "Content-Type": XLSX_TYPE})
+    return json.load(urllib.request.urlopen(req))
 
 
 def main(cmd, data=None):
     if cmd == "dax":
-        return {"dax": A.dax(data or f"{datetime.now(timezone.utc).year - 1}-01")}
+        return {"dax": A.dax(data or f"{datetime.now(timezone.utc).year - 2}-01")}
     if cmd == "actuals":
         out = A.refresh(rows(ACTUALS), A.parse(data))
         table(ACTUALS, out, ["line", "entity", "month", "amount"])
@@ -65,11 +80,13 @@ def main(cmd, data=None):
         table(FORECAST, log, ["entity", "line", "month", "amount", "ts", "note"])
         return {"submitted": log[-len(out):], "build": build()}
     if cmd == "build":
-        return build()
+        return build(data or "TOTAL")
+    if cmd == "publish":
+        return publish(*data)
     return {"error": f"unknown command {cmd!r}"}
 
 
 if __name__ == "__main__":
-    cmd = sys.argv[1]
-    data = json.load(sys.stdin) if cmd in ("actuals", "submit") else (sys.argv[2] if len(sys.argv) > 2 else None)
+    cmd, args = sys.argv[1], sys.argv[2:]
+    data = json.load(sys.stdin) if cmd in ("actuals", "submit") else (args if cmd == "publish" else (args[0] if args else None))
     print(json.dumps(main(cmd, data), ensure_ascii=False, indent=1))
