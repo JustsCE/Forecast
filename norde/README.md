@@ -1,7 +1,8 @@
 # NORDE forecast
 
 Monthly P&L forecast for the Horizon ledger, driven from chat: the LLM (GoodHealth MCP) pulls actuals with one DAX,
-submits forecast values, and the Lambda writes `NORDE-forecast.xlsx`. One Lambda, four actions, pure Python + openpyxl.
+submits forecast values, and the CLI writes `NORDE-forecast.xlsx`. Plain Python + openpyxl over one folder — no cloud
+runtime; it runs wherever the GoodHealth task runs Python.
 
 ## Taxonomy
 
@@ -27,32 +28,30 @@ Totals `KOPĀ IEŅĒMUMI`, `KOPĀ IZDEVUMI`, `PEĻŅA` and division/company tota
 | `actuals.py` | `ENTITIES`, `DIVISIONS`, the DAX, `parse` (DAX result → rows), `refresh` (replace months ≥ earliest incoming) |
 | `forecast.py` | `yoy`, `forecast` (baseline + submissions), `submit` (chat rows → entity grain; division/TOTAL split pro rata) |
 | `workbook.py` | the xlsx: `Summary` matrix + one sheet per line |
-| `lambda_function.py` | action dispatch + store (`S3_BUCKET`/`S3_PREFIX`, else local `forecast/`) |
+| `run.py` | CLI: JSON in (stdin), JSON out (stdout), files in `NORDE_DIR` (default `./forecast`) |
 | `test_forecast.py` | `pytest norde/test_forecast.py` |
-| `deploy.sh` | CloudShell: vendor openpyxl, zip, create/update Lambda + role, smoke `dax` |
 
-Store: `actuals.csv` (line, entity, month, amount) · `forecast.csv` append-only submissions (entity, line, month, amount, ts, note) · `NORDE-forecast.xlsx`.
+Folder: `actuals.csv` (line, entity, month, amount) · `forecast.csv` append-only submissions (entity, line, month, amount, ts, note) · `NORDE-forecast.xlsx`.
 
-## Actions
+## Commands
 
-```json
-{"action": "dax", "since": "2025-01"}
-→ {"dax": "EVALUATE SELECTCOLUMNS(...)"}            run it with powerbi_run_dax (default since = Jan t−1)
-
-{"action": "actuals", "dax": <powerbi_run_dax result verbatim>}
-→ {"rows": 2840, "months": ["2025-01", "2026-10"]}   months ≥ the earliest pulled month are replaced
-
-{"action": "submit", "note": "CFO call 19.10", "rows": [
-  {"entity": "Serviss",  "line": "1.6", "month": "2026-11", "amount": 160000},
-  {"entity": "02.1",     "line": "1.1", "month": "2026-12", "yoy": 0.05},
-  {"entity": "TOTAL",    "line": "2.3", "month": "2027-01", "amount": -300000}]}
-→ {"submitted": [{entity, line, month, amount, ts, note}, …], "build": {…}}
-   entity = entity code | division name | TOTAL; line = code or full text; yoy resolves against LY;
-   a division/TOTAL amount is split over its entities in proportion to their current forecast; any error → {"error": …}, nothing written
-
-{"action": "build"}
-→ {"key": ".../NORDE-forecast.xlsx", "current": "2026-10", "horizon": ["2026-10", "2027-12"], "submissions": 3}
 ```
+python norde/run.py dax [since]              → {"dax": "EVALUATE SELECTCOLUMNS(...)"}     run it with powerbi_run_dax (default since = Jan t−1)
+python norde/run.py actuals < result.json    → {"rows": 1923, "months": ["2025-01", "2026-10"]}
+                                               stdin = the powerbi_run_dax result verbatim; months ≥ the earliest pulled are replaced
+python norde/run.py submit  < rows.json      → {"submitted": [{entity, line, month, amount, ts, note}, …], "build": {…}}
+python norde/run.py build                    → {"file": "forecast/NORDE-forecast.xlsx", "current": "2026-10", "horizon": ["2026-10", "2027-12"], "submissions": 3}
+```
+
+`rows.json`:
+```json
+{"note": "CFO call 19.10", "rows": [
+  {"entity": "Serviss", "line": "1.6", "month": "2026-11", "amount": 160000},
+  {"entity": "02.1",    "line": "1.1", "month": "2026-12", "yoy": 0.05},
+  {"entity": "TOTAL",   "line": "2.3", "month": "2027-01", "amount": -300000}]}
+```
+`entity` = entity code | division name | `TOTAL`; `line` = code or full text; `yoy` resolves against LY; a division/TOTAL
+amount is split over its entities in proportion to their current forecast; any error → `{"error": …}`, nothing written.
 
 Daily use: `dax` with `since` = current − 1 → `actuals` → `build`. Full reload: `dax` without `since`.
 
@@ -65,13 +64,10 @@ Daily use: `dax` with `since` = current − 1 → `actuals` → `build`. Full re
   Entity amounts are values (forecast months blue); division and company totals are `=` sums; YoY is a formula with
   red/green rules; entity columns are grouped (collapsed) under their division total.
 
-## Deploy
+## Run
 
-```
-git clone <repo> && bash Forecast/norde/deploy.sh          # CloudShell; S3_BUCKET / S3_PREFIX env override the defaults
-```
-Defaults: bucket `goodhealth.lv`, prefix `agents/norde/justs.ceplis/working/forecast/` (Norde's working lane).
+Requires Python ≥ 3.8 and `openpyxl`. `NORDE_DIR` points the folder anywhere (a GoodHealth working lane, a mounted share).
+Inside a GoodHealth task: the LLM runs the DAX, saves the result to `result.json`, runs `actuals`, then `submit`/`build` as the
+conversation goes; the folder's xlsx is the deliverable.
 
-Local: `cd norde && python3 lambda_function.py '{"action":"build"}'` reads/writes `./forecast/`.
-
-Not built (yet): actual-vs-forecast error sheet (`forecast.csv` keeps every submission for it), GoodHealth task wrapper, SharePoint upload.
+Not built (yet): actual-vs-forecast error sheet (`forecast.csv` keeps every submission for it), the GoodHealth task config, SharePoint upload.
