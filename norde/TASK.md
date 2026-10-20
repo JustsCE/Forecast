@@ -10,9 +10,30 @@ Dataset `NORDE`: workspace `971b901d-13b2-415f-93a6-7a39a4c03ea7`, dataset `ccda
 
 ## 1. Refresh actuals
 
-Run the DAX from `taxonomy.py` (`dax(since)`): columns `l` line code, `e` entity, `m` month `YYYY-MM`, `a` amount.
+Run the DAX below with `powerbi_run_dax` (`@since` = the first month to pull, `YYYY-MM`; the same text is
+`taxonomy.dax(since)`): columns `l` line code, `e` entity, `m` month `YYYY-MM`, `a` amount.
 
-- **Mid-month refresh** (`since` = the first day of the previous month):
+```dax
+EVALUATE
+SELECTCOLUMNS(
+    SUMMARIZECOLUMNS(
+        'HOR Financials'[PNL_LINE],
+        'dim Strukturvienibas'[ACCOUNT_NR],
+        'dim Datumi'[yyyy-mm],
+        FILTER ( ALL ( 'dim Datumi'[yyyy-mm] ), 'dim Datumi'[yyyy-mm] >= "@since" ),
+        FILTER ( ALL ( 'HOR Financials'[PNL_LINE_Name] ), 'HOR Financials'[PNL_LINE_Name] <> "na" ),
+        FILTER ( ALL ( 'HOR Financials'[PNL_LINE] ), NOT CONTAINSSTRING ( 'HOR Financials'[PNL_LINE], "99999" ) ),
+        FILTER ( ALL ( 'HOR Financials'[transaction_type] ), 'HOR Financials'[transaction_type] <> "Kontu reformācija" ),
+        "a", [amount]
+    ),
+    "l", LEFT ( 'HOR Financials'[PNL_LINE], FIND ( " ", 'HOR Financials'[PNL_LINE] ) - 1 ),
+    "e", 'dim Strukturvienibas'[ACCOUNT_NR],
+    "m", 'dim Datumi'[yyyy-mm],
+    "a", ROUND ( [a], 0 )
+)
+```
+
+- **Mid-month refresh** (`since` = the previous month, `YYYY-MM`):
   1. `batch_clear_values` ranges `["pull!A2:D"]`
   2. `update_values` range `pull!A2` values `[[l, e, m, a], …]` straight from the result rows (`m` becomes a date on write).
 - **Month close** (`since` = `YYYY-01` of t−2, full history):
